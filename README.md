@@ -1,9 +1,10 @@
-﻿# PDF Placeholder Viewer
+﻿# PDF Placeholder Viewer (PySide6)
 
 Simple Python UI app to:
 - Open and read a PDF (no PDF editing)
 - Draw placeholder rectangles on top of pages
 - Move and resize placeholders after creation
+- Scroll pages with mouse wheel/scrollbars
 - Store each placeholder position and size (per page)
 - Export placeholders to JSON for use in other apps
 
@@ -30,7 +31,7 @@ python main.py
 - Resize selected: drag bottom-right square handle
 - Remove placeholder: right click on it
 - Scroll page: mouse wheel (hold `Shift` for horizontal)
-- Wheel at top/bottom automatically switches to previous/next PDF page
+- Wheel at top/bottom switches to previous/next PDF page
 - Navigate pages: `Prev` / `Next` (or keyboard arrows)
 - Zoom: `Zoom -` / `Zoom +`
 - Export coordinates: `Export JSON`

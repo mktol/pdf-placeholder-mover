@@ -1,18 +1,31 @@
 ﻿import json
-import tkinter as tk
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from tkinter import filedialog, messagebox
 
 import fitz  # PyMuPDF
-from PIL import Image, ImageTk
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import QAction, QColor, QImage, QKeySequence, QPainter, QPen
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QToolBar,
+    QWidget,
+)
 
 CANVAS_PAD = 16
 ZOOM_STEP = 1.15
 MIN_ZOOM = 0.25
 MAX_ZOOM = 4.0
 MIN_PLACEHOLDER_SIZE = 6.0
-RESIZE_HANDLE_SIZE = 8
+HANDLE_HALF_SIZE = 8.0
 
 
 @dataclass
@@ -25,272 +38,111 @@ class Placeholder:
     height: float
 
 
-class PdfPlaceholderApp:
-    def __init__(self, root: tk.Tk) -> None:
-        self.root = root
-        self.root.title("PDF Placeholder Viewer")
-        self.root.geometry("1200x800")
+class PdfCanvas(QWidget):
+    def __init__(self, owner: "MainWindow") -> None:
+        super().__init__()
+        self.owner = owner
+        self.setMouseTracking(True)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.setMinimumSize(400, 300)
 
-        self.doc: fitz.Document | None = None
-        self.current_page = 0
-        self.zoom = 1.0
-        self.tk_image: ImageTk.PhotoImage | None = None
-        self.page_size_display = (0, 0)
-
-        self.placeholders: list[Placeholder] = []
-        self._next_placeholder_id = 1
-
-        self._selected_placeholder_id: int | None = None
-        self._draw_start: tuple[float, float] | None = None
-        self._active_draft_rect: int | None = None
         self._drag_mode: str | None = None  # draw | move | resize
         self._active_placeholder_id: int | None = None
-        self._drag_anchor_page: tuple[float, float] | None = None
+        self._draw_start_page: QPointF | None = None
+        self._draw_current_page: QPointF | None = None
+        self._drag_anchor_page: QPointF | None = None
         self._drag_origin: tuple[float, float, float, float] | None = None
 
-        self._build_ui()
-        self._bind_events()
-
-    def _build_ui(self) -> None:
-        toolbar = tk.Frame(self.root)
-        toolbar.pack(side=tk.TOP, fill=tk.X, padx=8, pady=8)
-
-        tk.Button(toolbar, text="Open PDF", command=self.open_pdf).pack(side=tk.LEFT)
-        tk.Button(toolbar, text="Prev", command=self.prev_page).pack(side=tk.LEFT, padx=(8, 0))
-        tk.Button(toolbar, text="Next", command=self.next_page).pack(side=tk.LEFT)
-        tk.Button(toolbar, text="Zoom -", command=lambda: self.change_zoom(1 / ZOOM_STEP)).pack(side=tk.LEFT, padx=(8, 0))
-        tk.Button(toolbar, text="Zoom +", command=lambda: self.change_zoom(ZOOM_STEP)).pack(side=tk.LEFT)
-        tk.Button(toolbar, text="Export JSON", command=self.export_json).pack(side=tk.LEFT, padx=(8, 0))
-        tk.Button(toolbar, text="Clear Page Placeholders", command=self.clear_current_page).pack(side=tk.LEFT, padx=(8, 0))
-
-        self.status_var = tk.StringVar(value="Open a PDF to start.")
-        tk.Label(toolbar, textvariable=self.status_var, anchor="w").pack(side=tk.LEFT, padx=(16, 0), fill=tk.X, expand=True)
-
-        viewer = tk.Frame(self.root)
-        viewer.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        viewer.grid_rowconfigure(0, weight=1)
-        viewer.grid_columnconfigure(0, weight=1)
-
-        self.canvas = tk.Canvas(viewer, bg="#2f2f2f", highlightthickness=0)
-        self.canvas.grid(row=0, column=0, sticky="nsew")
-
-        v_scroll = tk.Scrollbar(viewer, orient=tk.VERTICAL, command=self.canvas.yview)
-        v_scroll.grid(row=0, column=1, sticky="ns")
-        h_scroll = tk.Scrollbar(viewer, orient=tk.HORIZONTAL, command=self.canvas.xview)
-        h_scroll.grid(row=1, column=0, sticky="ew")
-        self.canvas.configure(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
-
-        help_text = (
-            "Draw: drag empty area | Move: drag inside selected placeholder | "
-            "Resize: drag bottom-right square | Wheel: scroll | Remove: right click"
-        )
-        tk.Label(self.root, text=help_text, anchor="w").pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(0, 8))
-
-    def _bind_events(self) -> None:
-        self.canvas.bind("<ButtonPress-1>", self._on_left_press)
-        self.canvas.bind("<B1-Motion>", self._on_left_drag)
-        self.canvas.bind("<ButtonRelease-1>", self._on_left_release)
-        self.canvas.bind("<Button-3>", self._remove_on_right_click)
-        self.canvas.bind("<MouseWheel>", self._on_mouse_wheel)
-        self.canvas.bind("<Button-4>", lambda _e: self._on_mouse_wheel_legacy(-1))
-        self.canvas.bind("<Button-5>", lambda _e: self._on_mouse_wheel_legacy(1))
-
-        self.root.bind("<Left>", lambda _e: self.prev_page())
-        self.root.bind("<Right>", lambda _e: self.next_page())
-        self.root.bind("<Control-minus>", lambda _e: self.change_zoom(1 / ZOOM_STEP))
-        self.root.bind("<Control-equal>", lambda _e: self.change_zoom(ZOOM_STEP))
-
-    def open_pdf(self) -> None:
-        path = filedialog.askopenfilename(
-            title="Open PDF",
-            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
-        )
-        if not path:
+    def refresh_size(self) -> None:
+        if self.owner.page_image is None:
+            self.setFixedSize(800, 600)
             return
+        w = self.owner.page_image.width() + CANVAS_PAD * 2
+        h = self.owner.page_image.height() + CANVAS_PAD * 2
+        self.setFixedSize(w, h)
 
-        try:
-            if self.doc is not None:
-                self.doc.close()
-            self.doc = fitz.open(path)
-        except Exception as exc:
-            messagebox.showerror("Open PDF failed", str(exc))
-            return
+    def _widget_to_page(self, p: QPointF) -> QPointF:
+        return QPointF((p.x() - CANVAS_PAD) / self.owner.zoom, (p.y() - CANVAS_PAD) / self.owner.zoom)
 
-        self.current_page = 0
-        self.zoom = 1.0
-        self.placeholders.clear()
-        self._next_placeholder_id = 1
-        self._selected_placeholder_id = None
-        self.render_page()
-
-    def render_page(self) -> None:
-        self.canvas.delete("all")
-
-        if self.doc is None:
-            self.status_var.set("Open a PDF to start.")
-            return
-
-        page = self.doc[self.current_page]
-        pix = page.get_pixmap(matrix=fitz.Matrix(self.zoom, self.zoom), alpha=False)
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        self.tk_image = ImageTk.PhotoImage(img)
-        self.page_size_display = (pix.width, pix.height)
-
-        self.canvas.create_image(CANVAS_PAD, CANVAS_PAD, anchor=tk.NW, image=self.tk_image, tags=("pdf",))
-        self._draw_overlays()
-        self._update_status()
-        self.canvas.config(scrollregion=(0, 0, pix.width + 2 * CANVAS_PAD, pix.height + 2 * CANVAS_PAD))
-
-    def _draw_overlays(self) -> None:
-        self.canvas.delete("overlay")
-
-        for ph in self._placeholders_for_current_page():
-            selected = ph.id == self._selected_placeholder_id
-            outline = "#4fc3f7" if selected else "#ff5252"
-            width = 3 if selected else 2
-
-            x0 = CANVAS_PAD + ph.x * self.zoom
-            y0 = CANVAS_PAD + ph.y * self.zoom
-            x1 = CANVAS_PAD + (ph.x + ph.width) * self.zoom
-            y1 = CANVAS_PAD + (ph.y + ph.height) * self.zoom
-
-            self.canvas.create_rectangle(
-                x0,
-                y0,
-                x1,
-                y1,
-                outline=outline,
-                width=width,
-                dash=(4, 3),
-                fill="",
-                tags=("overlay", "placeholder", f"ph_{ph.id}"),
-            )
-
-            self.canvas.create_text(
-                x0 + 4,
-                y0 + 4,
-                text=f"#{ph.id}",
-                fill="#ffd54f",
-                anchor=tk.NW,
-                font=("Segoe UI", 10, "bold"),
-                tags=("overlay", "placeholder_label", f"ph_{ph.id}"),
-            )
-
-            if selected:
-                hs = RESIZE_HANDLE_SIZE
-                self.canvas.create_rectangle(
-                    x1 - hs,
-                    y1 - hs,
-                    x1 + hs,
-                    y1 + hs,
-                    outline="#4fc3f7",
-                    fill="#4fc3f7",
-                    width=1,
-                    tags=("overlay", "resize_handle", f"ph_{ph.id}"),
-                )
-
-    def _update_status(self) -> None:
-        if self.doc is None:
-            self.status_var.set("Open a PDF to start.")
-            return
-
-        total_pages = len(self.doc)
-        self.status_var.set(
-            f"Page {self.current_page + 1}/{total_pages} | Zoom {self.zoom:.2f} | "
-            f"Page placeholders: {len(self._placeholders_for_current_page())} | Total: {len(self.placeholders)}"
-        )
-
-    def _canvas_to_page(self, x: float, y: float) -> tuple[float, float]:
-        return (x - CANVAS_PAD) / self.zoom, (y - CANVAS_PAD) / self.zoom
-
-    def _event_canvas_xy(self, event: tk.Event) -> tuple[float, float]:
-        return self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
-
-    def _inside_page(self, page_x: float, page_y: float) -> bool:
-        width, height = self.page_size_display
-        return 0 <= page_x <= width / self.zoom and 0 <= page_y <= height / self.zoom
+    def _inside_page(self, page_pt: QPointF) -> bool:
+        return 0.0 <= page_pt.x() <= self.owner.page_width and 0.0 <= page_pt.y() <= self.owner.page_height
 
     def _page_limits(self) -> tuple[float, float]:
-        return self.page_size_display[0] / self.zoom, self.page_size_display[1] / self.zoom
+        return self.owner.page_width, self.owner.page_height
 
-    def _find_placeholder_by_id(self, placeholder_id: int | None) -> Placeholder | None:
-        if placeholder_id is None:
-            return None
-        for ph in self.placeholders:
-            if ph.id == placeholder_id:
+    def _placeholder_at(self, page_pt: QPointF) -> Placeholder | None:
+        cur = self.owner.placeholders_for_current_page()
+        for ph in reversed(cur):
+            if ph.x <= page_pt.x() <= ph.x + ph.width and ph.y <= page_pt.y() <= ph.y + ph.height:
                 return ph
         return None
 
-    def _placeholder_at(self, page_x: float, page_y: float) -> Placeholder | None:
-        current = self._placeholders_for_current_page()
-        for ph in reversed(current):
-            if ph.x <= page_x <= ph.x + ph.width and ph.y <= page_y <= ph.y + ph.height:
-                return ph
-        return None
-
-    def _is_on_resize_handle(self, ph: Placeholder, page_x: float, page_y: float) -> bool:
-        tol = RESIZE_HANDLE_SIZE / self.zoom
+    def _is_on_resize_handle(self, ph: Placeholder, page_pt: QPointF) -> bool:
+        tol = HANDLE_HALF_SIZE / self.owner.zoom
         right = ph.x + ph.width
         bottom = ph.y + ph.height
-        return right - tol <= page_x <= right + tol and bottom - tol <= page_y <= bottom + tol
+        return right - tol <= page_pt.x() <= right + tol and bottom - tol <= page_pt.y() <= bottom + tol
 
-    def _on_left_press(self, event: tk.Event) -> None:
-        if self.doc is None:
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if self.owner.doc is None:
             return
 
-        canvas_x, canvas_y = self._event_canvas_xy(event)
-        page_x, page_y = self._canvas_to_page(canvas_x, canvas_y)
-        clicked = self._placeholder_at(page_x, page_y)
+        page_pt = self._widget_to_page(event.position())
 
+        if event.button() == Qt.MouseButton.RightButton:
+            clicked = self._placeholder_at(page_pt)
+            if clicked is not None:
+                self.owner.placeholders = [ph for ph in self.owner.placeholders if ph.id != clicked.id]
+                if self.owner.selected_placeholder_id == clicked.id:
+                    self.owner.selected_placeholder_id = None
+                self.owner.update_status()
+                self.update()
+            return
+
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+
+        clicked = self._placeholder_at(page_pt)
         if clicked is not None:
-            self._selected_placeholder_id = clicked.id
+            self.owner.selected_placeholder_id = clicked.id
             self._active_placeholder_id = clicked.id
-            self._drag_anchor_page = (page_x, page_y)
+            self._drag_anchor_page = page_pt
             self._drag_origin = (clicked.x, clicked.y, clicked.width, clicked.height)
-            self._drag_mode = "resize" if self._is_on_resize_handle(clicked, page_x, page_y) else "move"
-            self._draw_overlays()
+            self._drag_mode = "resize" if self._is_on_resize_handle(clicked, page_pt) else "move"
+            self.update()
             return
 
-        if not self._inside_page(page_x, page_y):
+        if not self._inside_page(page_pt):
+            self.owner.selected_placeholder_id = None
+            self.update()
             return
 
-        self._selected_placeholder_id = None
+        self.owner.selected_placeholder_id = None
         self._drag_mode = "draw"
-        self._draw_start = (canvas_x, canvas_y)
-        self._active_draft_rect = self.canvas.create_rectangle(
-            canvas_x,
-            canvas_y,
-            canvas_x,
-            canvas_y,
-            outline="#00bcd4",
-            width=2,
-            dash=(2, 2),
-            fill="",
-            tags=("overlay", "draft"),
-        )
-        self._draw_overlays()
+        self._draw_start_page = page_pt
+        self._draw_current_page = page_pt
+        self.update()
 
-    def _on_left_drag(self, event: tk.Event) -> None:
-        if self.doc is None or self._drag_mode is None:
+    def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
+        if self.owner.doc is None or self._drag_mode is None:
             return
+
+        page_pt = self._widget_to_page(event.position())
+        page_w, page_h = self._page_limits()
 
         if self._drag_mode == "draw":
-            if self._draw_start is None or self._active_draft_rect is None:
-                return
-            canvas_x, canvas_y = self._event_canvas_xy(event)
-            x0, y0 = self._draw_start
-            self.canvas.coords(self._active_draft_rect, x0, y0, canvas_x, canvas_y)
+            px = max(0.0, min(page_w, page_pt.x()))
+            py = max(0.0, min(page_h, page_pt.y()))
+            self._draw_current_page = QPointF(px, py)
+            self.update()
             return
 
-        ph = self._find_placeholder_by_id(self._active_placeholder_id)
+        ph = self.owner.find_placeholder_by_id(self._active_placeholder_id)
         if ph is None or self._drag_anchor_page is None or self._drag_origin is None:
             return
 
-        canvas_x, canvas_y = self._event_canvas_xy(event)
-        cur_x, cur_y = self._canvas_to_page(canvas_x, canvas_y)
-        dx = cur_x - self._drag_anchor_page[0]
-        dy = cur_y - self._drag_anchor_page[1]
-        page_w, page_h = self._page_limits()
+        dx = page_pt.x() - self._drag_anchor_page.x()
+        dy = page_pt.y() - self._drag_anchor_page.y()
         ox, oy, ow, oh = self._drag_origin
 
         if self._drag_mode == "move":
@@ -300,119 +152,306 @@ class PdfPlaceholderApp:
             ph.width = max(MIN_PLACEHOLDER_SIZE, min(page_w - ox, ow + dx))
             ph.height = max(MIN_PLACEHOLDER_SIZE, min(page_h - oy, oh + dy))
 
-        self._draw_overlays()
+        self.update()
 
-    def _on_left_release(self, event: tk.Event) -> None:
-        if self.doc is None or self._drag_mode is None:
+    def mouseReleaseEvent(self, _event) -> None:  # type: ignore[override]
+        if self.owner.doc is None or self._drag_mode is None:
             return
 
-        if self._drag_mode == "draw" and self._draw_start is not None and self._active_draft_rect is not None:
-            x0, y0 = self._draw_start
-            x1, y1 = self._event_canvas_xy(event)
-            self.canvas.delete(self._active_draft_rect)
-            self._active_draft_rect = None
-            self._draw_start = None
+        if self._drag_mode == "draw" and self._draw_start_page is not None and self._draw_current_page is not None:
+            x0, y0 = self._draw_start_page.x(), self._draw_start_page.y()
+            x1, y1 = self._draw_current_page.x(), self._draw_current_page.y()
 
-            cx0, cx1 = sorted((x0, x1))
-            cy0, cy1 = sorted((y0, y1))
-
-            if abs(cx1 - cx0) >= 4 and abs(cy1 - cy0) >= 4:
-                p0x, p0y = self._canvas_to_page(cx0, cy0)
-                p1x, p1y = self._canvas_to_page(cx1, cy1)
-                page_w, page_h = self._page_limits()
-
-                p0x = max(0, min(page_w, p0x))
-                p1x = max(0, min(page_w, p1x))
-                p0y = max(0, min(page_h, p0y))
-                p1y = max(0, min(page_h, p1y))
-
-                if abs(p1x - p0x) >= MIN_PLACEHOLDER_SIZE and abs(p1y - p0y) >= MIN_PLACEHOLDER_SIZE:
-                    placeholder = Placeholder(
-                        id=self._next_placeholder_id,
-                        page_index=self.current_page,
-                        x=min(p0x, p1x),
-                        y=min(p0y, p1y),
-                        width=abs(p1x - p0x),
-                        height=abs(p1y - p0y),
-                    )
-                    self._next_placeholder_id += 1
-                    self.placeholders.append(placeholder)
-                    self._selected_placeholder_id = placeholder.id
+            w = abs(x1 - x0)
+            h = abs(y1 - y0)
+            if w >= MIN_PLACEHOLDER_SIZE and h >= MIN_PLACEHOLDER_SIZE:
+                ph = Placeholder(
+                    id=self.owner.next_placeholder_id,
+                    page_index=self.owner.current_page,
+                    x=min(x0, x1),
+                    y=min(y0, y1),
+                    width=w,
+                    height=h,
+                )
+                self.owner.next_placeholder_id += 1
+                self.owner.placeholders.append(ph)
+                self.owner.selected_placeholder_id = ph.id
 
         self._drag_mode = None
         self._active_placeholder_id = None
+        self._draw_start_page = None
+        self._draw_current_page = None
         self._drag_anchor_page = None
         self._drag_origin = None
-        self._draw_overlays()
-        self._update_status()
+        self.owner.update_status()
+        self.update()
 
-    def _remove_on_right_click(self, event: tk.Event) -> None:
-        canvas_x, canvas_y = self._event_canvas_xy(event)
-        items = self.canvas.find_overlapping(canvas_x - 2, canvas_y - 2, canvas_x + 2, canvas_y + 2)
-        placeholder_id = None
+    def paintEvent(self, _event) -> None:  # type: ignore[override]
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#2f2f2f"))
 
-        for item in reversed(items):
-            tags = self.canvas.gettags(item)
-            for tag in tags:
-                if tag.startswith("ph_"):
-                    placeholder_id = int(tag.split("_", 1)[1])
-                    break
-            if placeholder_id is not None:
-                break
+        if self.owner.page_image is not None:
+            painter.drawImage(CANVAS_PAD, CANVAS_PAD, self.owner.page_image)
 
-        if placeholder_id is None:
-            return
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        self.placeholders = [ph for ph in self.placeholders if ph.id != placeholder_id]
-        if self._selected_placeholder_id == placeholder_id:
-            self._selected_placeholder_id = None
-        self._draw_overlays()
-        self._update_status()
+        for ph in self.owner.placeholders_for_current_page():
+            selected = ph.id == self.owner.selected_placeholder_id
+            outline = QColor("#4fc3f7") if selected else QColor("#ff5252")
+            pen = QPen(outline, 3 if selected else 2)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
 
-    def _on_mouse_wheel_legacy(self, direction: int) -> None:
-        if self.doc is None or self._drag_mode is not None:
-            return
-        self._scroll_vertical(direction)
+            x0 = CANVAS_PAD + ph.x * self.owner.zoom
+            y0 = CANVAS_PAD + ph.y * self.owner.zoom
+            w = ph.width * self.owner.zoom
+            h = ph.height * self.owner.zoom
+            painter.drawRect(QRectF(x0, y0, w, h))
 
-    def _on_mouse_wheel(self, event: tk.Event) -> None:
-        if self.doc is None or self._drag_mode is not None:
-            return
+            painter.setPen(QColor("#ffd54f"))
+            painter.drawText(QPointF(x0 + 4, y0 + 14), f"#{ph.id}")
 
-        units = -int(event.delta / 120) if event.delta else 0
+            if selected:
+                painter.setPen(QPen(QColor("#4fc3f7"), 1))
+                painter.setBrush(QColor("#4fc3f7"))
+                rx = x0 + w
+                ry = y0 + h
+                painter.drawRect(QRectF(rx - HANDLE_HALF_SIZE, ry - HANDLE_HALF_SIZE, HANDLE_HALF_SIZE * 2, HANDLE_HALF_SIZE * 2))
+
+        if self._drag_mode == "draw" and self._draw_start_page is not None and self._draw_current_page is not None:
+            painter.setPen(QPen(QColor("#00bcd4"), 2, Qt.PenStyle.DashLine))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            x0 = CANVAS_PAD + self._draw_start_page.x() * self.owner.zoom
+            y0 = CANVAS_PAD + self._draw_start_page.y() * self.owner.zoom
+            x1 = CANVAS_PAD + self._draw_current_page.x() * self.owner.zoom
+            y1 = CANVAS_PAD + self._draw_current_page.y() * self.owner.zoom
+            painter.drawRect(QRectF(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0)))
+
+
+class PageScrollArea(QScrollArea):
+    def __init__(self, owner: "MainWindow") -> None:
+        super().__init__()
+        self.owner = owner
+        self.setWidgetResizable(False)
+
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
+        if self.owner.doc is None:
+            return super().wheelEvent(event)
+
+        delta_y = event.angleDelta().y()
+        delta_x = event.angleDelta().x()
+        if delta_y == 0 and delta_x == 0:
+            return super().wheelEvent(event)
+
+        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            bar = self.horizontalScrollBar()
+            step = bar.singleStep() * 3
+            units = -int(delta_y / 120) if delta_y else -int(delta_x / 120)
+            if units:
+                bar.setValue(bar.value() + units * step)
+                event.accept()
+                return
+            return super().wheelEvent(event)
+
+        bar = self.verticalScrollBar()
+        step = bar.singleStep() * 3
+        units = -int(delta_y / 120)
         if units == 0:
-            return
+            return super().wheelEvent(event)
 
-        if event.state & 0x0001:
-            self.canvas.xview_scroll(units, "units")
-            return
-
-        self._scroll_vertical(units)
-
-    def _scroll_vertical(self, units: int) -> None:
-        before = self.canvas.yview()
-        self.canvas.yview_scroll(units, "units")
-        after = self.canvas.yview()
-        moved = after != before
-
+        before = bar.value()
+        bar.setValue(before + units * step)
+        moved = bar.value() != before
         if moved:
+            event.accept()
             return
 
-        if units > 0 and self.doc is not None and self.current_page < len(self.doc) - 1:
-            self.next_page()
-            self.canvas.yview_moveto(0.0)
-        elif units < 0 and self.doc is not None and self.current_page > 0:
-            self.prev_page()
-            self.canvas.yview_moveto(1.0)
+        if units > 0 and self.owner.current_page < self.owner.total_pages() - 1:
+            self.owner.next_page()
+            self.verticalScrollBar().setValue(0)
+            event.accept()
+            return
 
-    def _placeholders_for_current_page(self) -> list[Placeholder]:
+        if units < 0 and self.owner.current_page > 0:
+            self.owner.prev_page()
+            self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
+            event.accept()
+            return
+
+        super().wheelEvent(event)
+
+
+class MainWindow(QMainWindow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("PDF Placeholder Viewer (PySide6)")
+        self.resize(1200, 800)
+
+        self.doc: fitz.Document | None = None
+        self.current_page = 0
+        self.zoom = 1.0
+        self.page_image: QImage | None = None
+        self.page_width = 0.0
+        self.page_height = 0.0
+
+        self.placeholders: list[Placeholder] = []
+        self.next_placeholder_id = 1
+        self.selected_placeholder_id: int | None = None
+
+        self._build_ui()
+        self.render_page()
+
+    def _build_ui(self) -> None:
+        toolbar = QToolBar("Main")
+        toolbar.setMovable(False)
+        self.addToolBar(toolbar)
+
+        open_btn = QPushButton("Open PDF")
+        open_btn.clicked.connect(self.open_pdf)
+        toolbar.addWidget(open_btn)
+
+        prev_btn = QPushButton("Prev")
+        prev_btn.clicked.connect(self.prev_page)
+        toolbar.addWidget(prev_btn)
+
+        next_btn = QPushButton("Next")
+        next_btn.clicked.connect(self.next_page)
+        toolbar.addWidget(next_btn)
+
+        zoom_out_btn = QPushButton("Zoom -")
+        zoom_out_btn.clicked.connect(lambda: self.change_zoom(1 / ZOOM_STEP))
+        toolbar.addWidget(zoom_out_btn)
+
+        zoom_in_btn = QPushButton("Zoom +")
+        zoom_in_btn.clicked.connect(lambda: self.change_zoom(ZOOM_STEP))
+        toolbar.addWidget(zoom_in_btn)
+
+        export_btn = QPushButton("Export JSON")
+        export_btn.clicked.connect(self.export_json)
+        toolbar.addWidget(export_btn)
+
+        clear_btn = QPushButton("Clear Page Placeholders")
+        clear_btn.clicked.connect(self.clear_current_page)
+        toolbar.addWidget(clear_btn)
+
+        self.status_label = QLabel("Open a PDF to start.")
+        self.status_label.setMinimumWidth(300)
+        toolbar.addWidget(self.status_label)
+
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.scroll_area = PageScrollArea(self)
+        self.canvas = PdfCanvas(self)
+        self.scroll_area.setWidget(self.canvas)
+        layout.addWidget(self.scroll_area)
+
+        self.setCentralWidget(container)
+
+        help_text = QLabel(
+            "Draw: drag empty area | Move: drag inside selected placeholder | "
+            "Resize: drag bottom-right square | Wheel: scroll | Remove: right click"
+        )
+        self.statusBar().addWidget(help_text)
+
+        self._bind_shortcuts()
+
+    def _bind_shortcuts(self) -> None:
+        prev_action = QAction(self)
+        prev_action.setShortcut(QKeySequence(Qt.Key.Key_Left))
+        prev_action.triggered.connect(self.prev_page)
+        self.addAction(prev_action)
+
+        next_action = QAction(self)
+        next_action.setShortcut(QKeySequence(Qt.Key.Key_Right))
+        next_action.triggered.connect(self.next_page)
+        self.addAction(next_action)
+
+        zoom_in_action = QAction(self)
+        zoom_in_action.setShortcut(QKeySequence("Ctrl+="))
+        zoom_in_action.triggered.connect(lambda: self.change_zoom(ZOOM_STEP))
+        self.addAction(zoom_in_action)
+
+        zoom_out_action = QAction(self)
+        zoom_out_action.setShortcut(QKeySequence("Ctrl+-"))
+        zoom_out_action.triggered.connect(lambda: self.change_zoom(1 / ZOOM_STEP))
+        self.addAction(zoom_out_action)
+
+    def total_pages(self) -> int:
+        return len(self.doc) if self.doc is not None else 0
+
+    def find_placeholder_by_id(self, placeholder_id: int | None) -> Placeholder | None:
+        if placeholder_id is None:
+            return None
+        for ph in self.placeholders:
+            if ph.id == placeholder_id:
+                return ph
+        return None
+
+    def placeholders_for_current_page(self) -> list[Placeholder]:
         return [ph for ph in self.placeholders if ph.page_index == self.current_page]
+
+    def open_pdf(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF files (*.pdf);;All files (*.*)")
+        if not path:
+            return
+
+        try:
+            if self.doc is not None:
+                self.doc.close()
+            self.doc = fitz.open(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Open PDF failed", str(exc))
+            return
+
+        self.current_page = 0
+        self.zoom = 1.0
+        self.placeholders.clear()
+        self.next_placeholder_id = 1
+        self.selected_placeholder_id = None
+        self.render_page()
+
+    def render_page(self) -> None:
+        if self.doc is None:
+            self.page_image = None
+            self.page_width = 0
+            self.page_height = 0
+            self.canvas.refresh_size()
+            self.canvas.update()
+            self.update_status()
+            return
+
+        page = self.doc[self.current_page]
+        pix = page.get_pixmap(matrix=fitz.Matrix(self.zoom, self.zoom), alpha=False)
+
+        # Copy detaches from PyMuPDF buffer so image remains valid after function exit.
+        image = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888).copy()
+        self.page_image = image
+        self.page_width = pix.width / self.zoom
+        self.page_height = pix.height / self.zoom
+
+        self.canvas.refresh_size()
+        self.canvas.update()
+        self.update_status()
+
+    def update_status(self) -> None:
+        if self.doc is None:
+            self.status_label.setText("Open a PDF to start.")
+            return
+
+        self.status_label.setText(
+            f"Page {self.current_page + 1}/{len(self.doc)} | Zoom {self.zoom:.2f} | "
+            f"Page placeholders: {len(self.placeholders_for_current_page())} | Total: {len(self.placeholders)}"
+        )
 
     def prev_page(self) -> None:
         if self.doc is None:
             return
         if self.current_page > 0:
             self.current_page -= 1
-            self._selected_placeholder_id = None
+            self.selected_placeholder_id = None
             self.render_page()
 
     def next_page(self) -> None:
@@ -420,7 +459,7 @@ class PdfPlaceholderApp:
             return
         if self.current_page < len(self.doc) - 1:
             self.current_page += 1
-            self._selected_placeholder_id = None
+            self.selected_placeholder_id = None
             self.render_page()
 
     def change_zoom(self, factor: float) -> None:
@@ -436,14 +475,14 @@ class PdfPlaceholderApp:
 
     def export_json(self) -> None:
         if not self.placeholders:
-            messagebox.showinfo("Nothing to export", "No placeholders to export yet.")
+            QMessageBox.information(self, "Nothing to export", "No placeholders to export yet.")
             return
 
-        path = filedialog.asksaveasfilename(
-            title="Save placeholders JSON",
-            defaultextension=".json",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-            initialfile="placeholders.json",
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save placeholders JSON",
+            "placeholders.json",
+            "JSON files (*.json);;All files (*.*)",
         )
         if not path:
             return
@@ -456,10 +495,10 @@ class PdfPlaceholderApp:
         try:
             Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except Exception as exc:
-            messagebox.showerror("Export failed", str(exc))
+            QMessageBox.critical(self, "Export failed", str(exc))
             return
 
-        messagebox.showinfo("Export complete", f"Saved {len(self.placeholders)} placeholders to:\n{path}")
+        QMessageBox.information(self, "Export complete", f"Saved {len(self.placeholders)} placeholders to:\n{path}")
 
     def clear_current_page(self) -> None:
         if self.doc is None:
@@ -467,17 +506,22 @@ class PdfPlaceholderApp:
 
         before = len(self.placeholders)
         self.placeholders = [ph for ph in self.placeholders if ph.page_index != self.current_page]
-        removed = before - len(self.placeholders)
-        if removed:
-            self._selected_placeholder_id = None
-            self.render_page()
+        if before != len(self.placeholders):
+            self.selected_placeholder_id = None
+            self.canvas.update()
+            self.update_status()
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        if self.doc is not None:
+            self.doc.close()
+        super().closeEvent(event)
 
 
 def main() -> None:
-    root = tk.Tk()
-    app = PdfPlaceholderApp(root)
-    app.render_page()
-    root.mainloop()
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
