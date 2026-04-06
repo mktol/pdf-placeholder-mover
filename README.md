@@ -6,6 +6,8 @@ Simple Python UI app to:
 - Move and resize placeholders after creation
 - Scroll pages with mouse wheel/scrollbars
 - Store each placeholder position and size (per page)
+- Import placeholders from DocuSign-style tabs JSON
+- Export placeholders to DocuSign-style tabs JSON
 - Export placeholders to JSON for use in other apps
 
 ## Install
@@ -25,6 +27,7 @@ python main.py
 ## Usage
 
 - Click `Open PDF`
+- Import DocuSign tabs: `Import Tabs JSON`
 - Draw placeholder: drag on empty area
 - Select placeholder: left click on it
 - Move selected: drag inside placeholder
@@ -34,9 +37,46 @@ python main.py
 - Wheel at top/bottom switches to previous/next PDF page
 - Navigate pages: `Prev` / `Next` (or keyboard arrows)
 - Zoom: `Zoom -` / `Zoom +`
-- Export coordinates: `Export JSON`
+- Export DocuSign tabs: `Export DocuSign JSON`
+- Export app raw data: `Export Raw JSON`
 
-## JSON format
+## DocuSign-style JSON format
+
+Export produces this structure:
+
+```json
+{
+  "recipients": {
+    "signers": [
+      {
+        "tabs": {
+          "fullNameTabs": [
+            {
+              "documentId": "1",
+              "pageNumber": 1,
+              "xPosition": 70,
+              "yPosition": 655,
+              "tabId": "uuid",
+              "tabLabel": "some label",
+              "width": 160,
+              "height": 24
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
+```
+
+Import supports finding tab objects anywhere in JSON if they contain:
+- `pageNumber`
+- `xPosition`
+- `yPosition`
+
+Width/height fallback defaults are used when imported values are `0`.
+
+## Raw app JSON format
 
 ```json
 {

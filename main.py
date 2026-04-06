@@ -2,6 +2,7 @@
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from uuid import uuid4
 
 import fitz  # PyMuPDF
 from PySide6.QtCore import QPointF, QRectF, Qt
@@ -36,6 +37,9 @@ class Placeholder:
     y: float
     width: float
     height: float
+    tab_id: str
+    tab_label: str = ""
+    tab_type: str = "fullNameTabs"
 
 
 class PdfCanvas(QWidget):
@@ -172,6 +176,7 @@ class PdfCanvas(QWidget):
                     y=min(y0, y1),
                     width=w,
                     height=h,
+                    tab_id=str(uuid4()),
                 )
                 self.owner.next_placeholder_id += 1
                 self.owner.placeholders.append(ph)
@@ -210,7 +215,8 @@ class PdfCanvas(QWidget):
             painter.drawRect(QRectF(x0, y0, w, h))
 
             painter.setPen(QColor("#ffd54f"))
-            painter.drawText(QPointF(x0 + 4, y0 + 14), f"#{ph.id}")
+            caption = ph.tab_label if ph.tab_label else ph.tab_id[:8]
+            painter.drawText(QPointF(x0 + 4, y0 + 14), caption)
 
             if selected:
                 painter.setPen(QPen(QColor("#4fc3f7"), 1))
@@ -327,7 +333,15 @@ class MainWindow(QMainWindow):
         zoom_in_btn.clicked.connect(lambda: self.change_zoom(ZOOM_STEP))
         toolbar.addWidget(zoom_in_btn)
 
-        export_btn = QPushButton("Export JSON")
+        import_tabs_btn = QPushButton("Import Tabs JSON")
+        import_tabs_btn.clicked.connect(self.import_tabs_json)
+        toolbar.addWidget(import_tabs_btn)
+
+        export_tabs_btn = QPushButton("Export DocuSign JSON")
+        export_tabs_btn.clicked.connect(self.export_tabs_json)
+        toolbar.addWidget(export_tabs_btn)
+
+        export_btn = QPushButton("Export Raw JSON")
         export_btn.clicked.connect(self.export_json)
         toolbar.addWidget(export_btn)
 
@@ -472,6 +486,135 @@ class MainWindow(QMainWindow):
 
         self.zoom = new_zoom
         self.render_page()
+
+    def _extract_tabs_from_payload(self, node, found: list[dict], tab_type: str | None = None) -> None:
+        if isinstance(node, dict):
+            if (
+                isinstance(node.get("xPosition"), (int, float))
+                and isinstance(node.get("yPosition"), (int, float))
+                and isinstance(node.get("pageNumber"), (int, float))
+            ):
+                tab = dict(node)
+                tab["_tab_type"] = tab_type or "fullNameTabs"
+                found.append(tab)
+
+            for key, value in node.items():
+                child_tab_type = key if key.endswith("Tabs") else tab_type
+                self._extract_tabs_from_payload(value, found, child_tab_type)
+            return
+
+        if isinstance(node, list):
+            for item in node:
+                self._extract_tabs_from_payload(item, found, tab_type)
+
+    def import_tabs_json(self) -> None:
+        if self.doc is None:
+            QMessageBox.information(self, "Open PDF first", "Open a PDF before importing tabs JSON.")
+            return
+
+        path, _ = QFileDialog.getOpenFileName(self, "Import tabs JSON", "", "JSON files (*.json);;All files (*.*)")
+        if not path:
+            return
+
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        except Exception as exc:
+            QMessageBox.critical(self, "Import failed", f"Could not read JSON:\n{exc}")
+            return
+
+        tabs: list[dict] = []
+        self._extract_tabs_from_payload(payload, tabs)
+        if not tabs:
+            QMessageBox.warning(self, "No tabs found", "No tab entries with x/y/pageNumber were found.")
+            return
+
+        new_placeholders: list[Placeholder] = []
+        doc_pages = len(self.doc)
+        next_id = 1
+        for tab in tabs:
+            page_num = int(tab.get("pageNumber", 1))
+            page_index = page_num - 1
+            if page_index < 0 or page_index >= doc_pages:
+                continue
+
+            width = float(tab.get("width", 0) or 0)
+            height = float(tab.get("height", 0) or 0)
+            if width <= 0:
+                width = 160.0
+            if height <= 0:
+                height = 24.0
+
+            ph = Placeholder(
+                id=next_id,
+                page_index=page_index,
+                x=float(tab.get("xPosition", 0)),
+                y=float(tab.get("yPosition", 0)),
+                width=width,
+                height=height,
+                tab_id=str(tab.get("tabId") or uuid4()),
+                tab_label=str(tab.get("tabLabel") or ""),
+                tab_type=str(tab.get("_tab_type") or "fullNameTabs"),
+            )
+            next_id += 1
+            new_placeholders.append(ph)
+
+        if not new_placeholders:
+            QMessageBox.warning(self, "No usable tabs", "No tabs matched this PDF page count.")
+            return
+
+        self.placeholders = new_placeholders
+        self.next_placeholder_id = max(ph.id for ph in self.placeholders) + 1
+        self.selected_placeholder_id = None
+        self.current_page = min(self.current_page, len(self.doc) - 1)
+        self.render_page()
+        QMessageBox.information(self, "Import complete", f"Imported {len(new_placeholders)} tabs as placeholders.")
+
+    def export_tabs_json(self) -> None:
+        if not self.placeholders:
+            QMessageBox.information(self, "Nothing to export", "No placeholders to export yet.")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save DocuSign-style tabs JSON",
+            "docusign_tabs.json",
+            "JSON files (*.json);;All files (*.*)",
+        )
+        if not path:
+            return
+
+        grouped: dict[str, list[dict]] = {}
+        for ph in self.placeholders:
+            tab_type = ph.tab_type or "fullNameTabs"
+            tab = {
+                "documentId": "1",
+                "pageNumber": ph.page_index + 1,
+                "xPosition": round(ph.x, 2),
+                "yPosition": round(ph.y, 2),
+                "tabId": ph.tab_id,
+                "tabLabel": ph.tab_label,
+                "width": round(ph.width, 2) if ph.width > 0 else 0,
+                "height": round(ph.height, 2) if ph.height > 0 else 0,
+            }
+            grouped.setdefault(tab_type, []).append(tab)
+
+        payload = {
+            "recipients": {
+                "signers": [
+                    {
+                        "tabs": grouped,
+                    }
+                ]
+            }
+        }
+
+        try:
+            Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception as exc:
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+
+        QMessageBox.information(self, "Export complete", f"Saved {len(self.placeholders)} tabs to:\n{path}")
 
     def export_json(self) -> None:
         if not self.placeholders:
