@@ -29,6 +29,8 @@ python main.py
 - Move selected: drag inside placeholder
 - Resize selected: drag bottom-right square handle
 - Remove placeholder: right click on it
+- Scroll page: mouse wheel (hold `Shift` for horizontal)
+- Wheel at top/bottom automatically switches to previous/next PDF page
 - Navigate pages: `Prev` / `Next` (or keyboard arrows)
 - Zoom: `Zoom -` / `Zoom +`
 - Export coordinates: `Export JSON`

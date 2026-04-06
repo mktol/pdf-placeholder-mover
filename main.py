@@ -66,12 +66,23 @@ class PdfPlaceholderApp:
         self.status_var = tk.StringVar(value="Open a PDF to start.")
         tk.Label(toolbar, textvariable=self.status_var, anchor="w").pack(side=tk.LEFT, padx=(16, 0), fill=tk.X, expand=True)
 
-        self.canvas = tk.Canvas(self.root, bg="#2f2f2f", highlightthickness=0)
-        self.canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        viewer = tk.Frame(self.root)
+        viewer.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        viewer.grid_rowconfigure(0, weight=1)
+        viewer.grid_columnconfigure(0, weight=1)
+
+        self.canvas = tk.Canvas(viewer, bg="#2f2f2f", highlightthickness=0)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+
+        v_scroll = tk.Scrollbar(viewer, orient=tk.VERTICAL, command=self.canvas.yview)
+        v_scroll.grid(row=0, column=1, sticky="ns")
+        h_scroll = tk.Scrollbar(viewer, orient=tk.HORIZONTAL, command=self.canvas.xview)
+        h_scroll.grid(row=1, column=0, sticky="ew")
+        self.canvas.configure(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
 
         help_text = (
             "Draw: drag empty area | Move: drag inside selected placeholder | "
-            "Resize: drag bottom-right square | Remove: right click"
+            "Resize: drag bottom-right square | Wheel: scroll | Remove: right click"
         )
         tk.Label(self.root, text=help_text, anchor="w").pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(0, 8))
 
@@ -80,6 +91,9 @@ class PdfPlaceholderApp:
         self.canvas.bind("<B1-Motion>", self._on_left_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_left_release)
         self.canvas.bind("<Button-3>", self._remove_on_right_click)
+        self.canvas.bind("<MouseWheel>", self._on_mouse_wheel)
+        self.canvas.bind("<Button-4>", lambda _e: self._on_mouse_wheel_legacy(-1))
+        self.canvas.bind("<Button-5>", lambda _e: self._on_mouse_wheel_legacy(1))
 
         self.root.bind("<Left>", lambda _e: self.prev_page())
         self.root.bind("<Right>", lambda _e: self.next_page())
@@ -189,6 +203,9 @@ class PdfPlaceholderApp:
     def _canvas_to_page(self, x: float, y: float) -> tuple[float, float]:
         return (x - CANVAS_PAD) / self.zoom, (y - CANVAS_PAD) / self.zoom
 
+    def _event_canvas_xy(self, event: tk.Event) -> tuple[float, float]:
+        return self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+
     def _inside_page(self, page_x: float, page_y: float) -> bool:
         width, height = self.page_size_display
         return 0 <= page_x <= width / self.zoom and 0 <= page_y <= height / self.zoom
@@ -221,7 +238,8 @@ class PdfPlaceholderApp:
         if self.doc is None:
             return
 
-        page_x, page_y = self._canvas_to_page(event.x, event.y)
+        canvas_x, canvas_y = self._event_canvas_xy(event)
+        page_x, page_y = self._canvas_to_page(canvas_x, canvas_y)
         clicked = self._placeholder_at(page_x, page_y)
 
         if clicked is not None:
@@ -238,12 +256,12 @@ class PdfPlaceholderApp:
 
         self._selected_placeholder_id = None
         self._drag_mode = "draw"
-        self._draw_start = (event.x, event.y)
+        self._draw_start = (canvas_x, canvas_y)
         self._active_draft_rect = self.canvas.create_rectangle(
-            event.x,
-            event.y,
-            event.x,
-            event.y,
+            canvas_x,
+            canvas_y,
+            canvas_x,
+            canvas_y,
             outline="#00bcd4",
             width=2,
             dash=(2, 2),
@@ -259,15 +277,17 @@ class PdfPlaceholderApp:
         if self._drag_mode == "draw":
             if self._draw_start is None or self._active_draft_rect is None:
                 return
+            canvas_x, canvas_y = self._event_canvas_xy(event)
             x0, y0 = self._draw_start
-            self.canvas.coords(self._active_draft_rect, x0, y0, event.x, event.y)
+            self.canvas.coords(self._active_draft_rect, x0, y0, canvas_x, canvas_y)
             return
 
         ph = self._find_placeholder_by_id(self._active_placeholder_id)
         if ph is None or self._drag_anchor_page is None or self._drag_origin is None:
             return
 
-        cur_x, cur_y = self._canvas_to_page(event.x, event.y)
+        canvas_x, canvas_y = self._event_canvas_xy(event)
+        cur_x, cur_y = self._canvas_to_page(canvas_x, canvas_y)
         dx = cur_x - self._drag_anchor_page[0]
         dy = cur_y - self._drag_anchor_page[1]
         page_w, page_h = self._page_limits()
@@ -288,7 +308,7 @@ class PdfPlaceholderApp:
 
         if self._drag_mode == "draw" and self._draw_start is not None and self._active_draft_rect is not None:
             x0, y0 = self._draw_start
-            x1, y1 = event.x, event.y
+            x1, y1 = self._event_canvas_xy(event)
             self.canvas.delete(self._active_draft_rect)
             self._active_draft_rect = None
             self._draw_start = None
@@ -327,7 +347,8 @@ class PdfPlaceholderApp:
         self._update_status()
 
     def _remove_on_right_click(self, event: tk.Event) -> None:
-        items = self.canvas.find_overlapping(event.x - 2, event.y - 2, event.x + 2, event.y + 2)
+        canvas_x, canvas_y = self._event_canvas_xy(event)
+        items = self.canvas.find_overlapping(canvas_x - 2, canvas_y - 2, canvas_x + 2, canvas_y + 2)
         placeholder_id = None
 
         for item in reversed(items):
@@ -347,6 +368,41 @@ class PdfPlaceholderApp:
             self._selected_placeholder_id = None
         self._draw_overlays()
         self._update_status()
+
+    def _on_mouse_wheel_legacy(self, direction: int) -> None:
+        if self.doc is None or self._drag_mode is not None:
+            return
+        self._scroll_vertical(direction)
+
+    def _on_mouse_wheel(self, event: tk.Event) -> None:
+        if self.doc is None or self._drag_mode is not None:
+            return
+
+        units = -int(event.delta / 120) if event.delta else 0
+        if units == 0:
+            return
+
+        if event.state & 0x0001:
+            self.canvas.xview_scroll(units, "units")
+            return
+
+        self._scroll_vertical(units)
+
+    def _scroll_vertical(self, units: int) -> None:
+        before = self.canvas.yview()
+        self.canvas.yview_scroll(units, "units")
+        after = self.canvas.yview()
+        moved = after != before
+
+        if moved:
+            return
+
+        if units > 0 and self.doc is not None and self.current_page < len(self.doc) - 1:
+            self.next_page()
+            self.canvas.yview_moveto(0.0)
+        elif units < 0 and self.doc is not None and self.current_page > 0:
+            self.prev_page()
+            self.canvas.yview_moveto(1.0)
 
     def _placeholders_for_current_page(self) -> list[Placeholder]:
         return [ph for ph in self.placeholders if ph.page_index == self.current_page]
