@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -220,7 +221,7 @@ class PdfCanvas(QWidget):
                     width=w,
                     height=h,
                     tab_id=str(uuid4()),
-                    document_id="1",
+                    document_id=self.owner.current_document_id,
                     tab_type=self.owner.default_tab_type,
                 )
                 self.owner.next_placeholder_id += 1
@@ -350,6 +351,7 @@ class MainWindow(QMainWindow):
         self.next_placeholder_id = 1
         self.selected_placeholder_id: int | None = None
         self.default_tab_type = "signHereTabs"
+        self.current_document_id = "1"
 
         self._build_ui()
         self.render_page()
@@ -394,6 +396,12 @@ class MainWindow(QMainWindow):
         clear_btn = QPushButton("Clear Page Placeholders")
         clear_btn.clicked.connect(self.clear_current_page)
         toolbar.addWidget(clear_btn)
+
+        toolbar.addWidget(QLabel("Document ID:"))
+        self.document_id_edit = QLineEdit(self.current_document_id)
+        self.document_id_edit.setFixedWidth(64)
+        self.document_id_edit.editingFinished.connect(self._on_document_id_changed)
+        toolbar.addWidget(self.document_id_edit)
 
         toolbar.addWidget(QLabel("Tab type:"))
         self.tab_type_combo = QComboBox()
@@ -452,6 +460,17 @@ class MainWindow(QMainWindow):
     def _on_tab_type_changed(self, value: str) -> None:
         if value:
             self.default_tab_type = value
+            self.update_status()
+
+    def _on_document_id_changed(self) -> None:
+        value = self.document_id_edit.text().strip()
+        if not value:
+            value = "1"
+            self.document_id_edit.setText(value)
+        self.current_document_id = value
+        self.selected_placeholder_id = None
+        self.canvas.update()
+        self.update_status()
 
     @staticmethod
     def _to_float(value, default: float = 0.0) -> float:
@@ -489,7 +508,14 @@ class MainWindow(QMainWindow):
         return None
 
     def placeholders_for_current_page(self) -> list[Placeholder]:
-        return [ph for ph in self.placeholders if ph.page_index == self.current_page]
+        return [
+            ph
+            for ph in self.placeholders
+            if ph.page_index == self.current_page and str(ph.document_id) == self.current_document_id
+        ]
+
+    def placeholders_for_current_document(self) -> list[Placeholder]:
+        return [ph for ph in self.placeholders if str(ph.document_id) == self.current_document_id]
 
     def open_pdf(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF files (*.pdf);;All files (*.*)")
@@ -541,8 +567,10 @@ class MainWindow(QMainWindow):
 
         self.status_label.setText(
             f"Page {self.current_page + 1}/{len(self.doc)} | Zoom {self.zoom:.2f} | "
+            f"Document ID: {self.current_document_id} | "
             f"Tab type: {self.default_tab_type} | "
-            f"Page placeholders: {len(self.placeholders_for_current_page())} | Total: {len(self.placeholders)}"
+            f"Page placeholders: {len(self.placeholders_for_current_page())} | "
+            f"Doc placeholders: {len(self.placeholders_for_current_document())} | Total: {len(self.placeholders)}"
         )
 
     def prev_page(self) -> None:
@@ -652,13 +680,21 @@ class MainWindow(QMainWindow):
 
         self.placeholders = new_placeholders
         self.next_placeholder_id = max(ph.id for ph in self.placeholders) + 1
+        if self.placeholders:
+            self.current_document_id = str(self.placeholders[0].document_id or "1")
+            self.document_id_edit.setText(self.current_document_id)
         self.selected_placeholder_id = None
         self.current_page = min(self.current_page, len(self.doc) - 1)
         self.render_page()
-        QMessageBox.information(self, "Import complete", f"Imported {len(new_placeholders)} tabs as placeholders.")
+        QMessageBox.information(
+            self,
+            "Import complete",
+            f"Imported {len(new_placeholders)} tabs as placeholders.\nCurrent document filter: {self.current_document_id}",
+        )
 
     def export_tabs_json(self) -> None:
-        if not self.placeholders:
+        doc_placeholders = [ph for ph in self.placeholders if str(ph.document_id) == self.current_document_id]
+        if not doc_placeholders:
             QMessageBox.information(self, "Nothing to export", "No placeholders to export yet.")
             return
 
@@ -672,7 +708,7 @@ class MainWindow(QMainWindow):
             return
 
         grouped: dict[str, list[dict]] = {}
-        for ph in self.placeholders:
+        for ph in doc_placeholders:
             tab_type = self._normalize_tab_collection_name(ph.tab_type) or self.default_tab_type
             tab = {
                 "documentId": str(ph.document_id or "1"),
@@ -702,7 +738,11 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Export failed", str(exc))
             return
 
-        QMessageBox.information(self, "Export complete", f"Saved {len(self.placeholders)} tabs to:\n{path}")
+        QMessageBox.information(
+            self,
+            "Export complete",
+            f"Saved {len(doc_placeholders)} tabs for documentId={self.current_document_id} to:\n{path}",
+        )
 
     def export_json(self) -> None:
         if not self.placeholders:
@@ -736,7 +776,11 @@ class MainWindow(QMainWindow):
             return
 
         before = len(self.placeholders)
-        self.placeholders = [ph for ph in self.placeholders if ph.page_index != self.current_page]
+        self.placeholders = [
+            ph
+            for ph in self.placeholders
+            if not (ph.page_index == self.current_page and str(ph.document_id) == self.current_document_id)
+        ]
         if before != len(self.placeholders):
             self.selected_placeholder_id = None
             self.canvas.update()

@@ -28,6 +28,7 @@ python main.py
 
 - Click `Open PDF`
 - Choose tab collection type in `Tab type` dropdown (for new placeholders)
+- Set active `Document ID` (for example `3`) when working with one template document
 - Import DocuSign tabs: `Import Tabs JSON`
 - Draw placeholder: drag on empty area
 - Select placeholder: left click on it
@@ -40,6 +41,10 @@ python main.py
 - Zoom: `Zoom -` / `Zoom +`
 - Export DocuSign tabs: `Export DocuSign JSON`
 - Export app raw data: `Export Raw JSON`
+
+DocuSign export is filtered by active `Document ID`:
+- only placeholders with that `documentId` are exported
+- `Clear Page Placeholders` also affects only current page of active `Document ID`
 
 ## DocuSign-style JSON format
 
