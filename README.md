@@ -24,6 +24,12 @@ pip install -r requirements.txt
 python main.py
 ```
 
+## Logging
+
+- Console logs are printed when you run in terminal: `python main.py`
+- File logs are written to `app.log` in project folder
+- Log rotation: `app.log` up to ~1 MB, keeps 3 backups
+
 ## Usage
 
 - Click `Open PDF`

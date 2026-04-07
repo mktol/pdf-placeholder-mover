@@ -1,6 +1,8 @@
 ﻿import json
+import logging
 import sys
 from dataclasses import asdict, dataclass
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from uuid import uuid4
 
@@ -70,6 +72,26 @@ DOCUSIGN_TAB_TYPES = [
 ]
 DOCUSIGN_TAB_TYPES_SET = set(DOCUSIGN_TAB_TYPES)
 DOCUSIGN_TAB_TYPES_BY_LOWER = {name.lower(): name for name in DOCUSIGN_TAB_TYPES}
+LOGGER = logging.getLogger("pdf_doc_viewer")
+
+
+def configure_logging() -> None:
+    log_file = Path(__file__).resolve().parent / "app.log"
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.handlers.clear()
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+    root.addHandler(console_handler)
+
+    file_handler = RotatingFileHandler(log_file, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+    root.addHandler(file_handler)
 
 
 @dataclass
@@ -468,6 +490,7 @@ class MainWindow(QMainWindow):
             value = "1"
             self.document_id_edit.setText(value)
         self.current_document_id = value
+        LOGGER.info("Active document_id set to %s", self.current_document_id)
         self.selected_placeholder_id = None
         self.canvas.update()
         self.update_status()
@@ -526,7 +549,9 @@ class MainWindow(QMainWindow):
             if self.doc is not None:
                 self.doc.close()
             self.doc = fitz.open(path)
+            LOGGER.info("Opened PDF: %s (pages=%s)", path, len(self.doc))
         except Exception as exc:
+            LOGGER.exception("Failed to open PDF: %s", path)
             QMessageBox.critical(self, "Open PDF failed", str(exc))
             return
 
@@ -633,7 +658,9 @@ class MainWindow(QMainWindow):
 
         try:
             payload = json.loads(Path(path).read_text(encoding="utf-8"))
+            LOGGER.info("Importing tabs JSON: %s", path)
         except Exception as exc:
+            LOGGER.exception("Failed to read tabs JSON: %s", path)
             QMessageBox.critical(self, "Import failed", f"Could not read JSON:\n{exc}")
             return
 
@@ -691,6 +718,12 @@ class MainWindow(QMainWindow):
             "Import complete",
             f"Imported {len(new_placeholders)} tabs as placeholders.\nCurrent document filter: {self.current_document_id}",
         )
+        LOGGER.info(
+            "Imported %s placeholders from %s. Active document_id=%s",
+            len(new_placeholders),
+            path,
+            self.current_document_id,
+        )
 
     def export_tabs_json(self) -> None:
         doc_placeholders = [ph for ph in self.placeholders if str(ph.document_id) == self.current_document_id]
@@ -735,6 +768,7 @@ class MainWindow(QMainWindow):
         try:
             Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except Exception as exc:
+            LOGGER.exception("Failed to export DocuSign JSON: %s", path)
             QMessageBox.critical(self, "Export failed", str(exc))
             return
 
@@ -742,6 +776,12 @@ class MainWindow(QMainWindow):
             self,
             "Export complete",
             f"Saved {len(doc_placeholders)} tabs for documentId={self.current_document_id} to:\n{path}",
+        )
+        LOGGER.info(
+            "Exported %s placeholders to DocuSign JSON: %s (document_id=%s)",
+            len(doc_placeholders),
+            path,
+            self.current_document_id,
         )
 
     def export_json(self) -> None:
@@ -766,10 +806,12 @@ class MainWindow(QMainWindow):
         try:
             Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except Exception as exc:
+            LOGGER.exception("Failed to export raw JSON: %s", path)
             QMessageBox.critical(self, "Export failed", str(exc))
             return
 
         QMessageBox.information(self, "Export complete", f"Saved {len(self.placeholders)} placeholders to:\n{path}")
+        LOGGER.info("Exported %s placeholders to raw JSON: %s", len(self.placeholders), path)
 
     def clear_current_page(self) -> None:
         if self.doc is None:
@@ -785,14 +827,23 @@ class MainWindow(QMainWindow):
             self.selected_placeholder_id = None
             self.canvas.update()
             self.update_status()
+            LOGGER.info(
+                "Cleared %s placeholders on page=%s document_id=%s",
+                before - len(self.placeholders),
+                self.current_page + 1,
+                self.current_document_id,
+            )
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         if self.doc is not None:
             self.doc.close()
+        LOGGER.info("Application shutdown")
         super().closeEvent(event)
 
 
 def main() -> None:
+    configure_logging()
+    LOGGER.info("Application startup")
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
@@ -801,3 +852,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
