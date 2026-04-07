@@ -9,6 +9,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QAction, QColor, QImage, QKeySequence, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -27,6 +28,47 @@ MIN_ZOOM = 0.25
 MAX_ZOOM = 4.0
 MIN_PLACEHOLDER_SIZE = 6.0
 HANDLE_HALF_SIZE = 8.0
+DOCUSIGN_TAB_TYPES = [
+    "approveTabs",
+    "checkboxTabs",
+    "commentThreadTabs",
+    "commissionCountyTabs",
+    "commissionExpirationTabs",
+    "commissionNumberTabs",
+    "commissionStateTabs",
+    "companyTabs",
+    "dateSignedTabs",
+    "dateTabs",
+    "declineTabs",
+    "drawTabs",
+    "emailAddressTabs",
+    "emailTabs",
+    "envelopeIdTabs",
+    "firstNameTabs",
+    "formulaTabs",
+    "fullNameTabs",
+    "initialHereTabs",
+    "lastNameTabs",
+    "listTabs",
+    "notarizeTabs",
+    "notarySealTabs",
+    "noteTabs",
+    "numberTabs",
+    "numericalTabs",
+    "phoneNumberTabs",
+    "polyLineOverlayTabs",
+    "radioGroupTabs",
+    "signerAttachmentTabs",
+    "signHereTabs",
+    "smartSectionTabs",
+    "ssnTabs",
+    "textTabs",
+    "titleTabs",
+    "viewTabs",
+    "zipTabs",
+]
+DOCUSIGN_TAB_TYPES_SET = set(DOCUSIGN_TAB_TYPES)
+DOCUSIGN_TAB_TYPES_BY_LOWER = {name.lower(): name for name in DOCUSIGN_TAB_TYPES}
 
 
 @dataclass
@@ -38,6 +80,7 @@ class Placeholder:
     width: float
     height: float
     tab_id: str
+    document_id: str = "1"
     tab_label: str = ""
     tab_type: str = "fullNameTabs"
 
@@ -177,6 +220,8 @@ class PdfCanvas(QWidget):
                     width=w,
                     height=h,
                     tab_id=str(uuid4()),
+                    document_id="1",
+                    tab_type=self.owner.default_tab_type,
                 )
                 self.owner.next_placeholder_id += 1
                 self.owner.placeholders.append(ph)
@@ -304,6 +349,7 @@ class MainWindow(QMainWindow):
         self.placeholders: list[Placeholder] = []
         self.next_placeholder_id = 1
         self.selected_placeholder_id: int | None = None
+        self.default_tab_type = "signHereTabs"
 
         self._build_ui()
         self.render_page()
@@ -348,6 +394,13 @@ class MainWindow(QMainWindow):
         clear_btn = QPushButton("Clear Page Placeholders")
         clear_btn.clicked.connect(self.clear_current_page)
         toolbar.addWidget(clear_btn)
+
+        toolbar.addWidget(QLabel("Tab type:"))
+        self.tab_type_combo = QComboBox()
+        self.tab_type_combo.addItems(DOCUSIGN_TAB_TYPES)
+        self.tab_type_combo.setCurrentText(self.default_tab_type)
+        self.tab_type_combo.currentTextChanged.connect(self._on_tab_type_changed)
+        toolbar.addWidget(self.tab_type_combo)
 
         self.status_label = QLabel("Open a PDF to start.")
         self.status_label.setMinimumWidth(300)
@@ -395,6 +448,37 @@ class MainWindow(QMainWindow):
 
     def total_pages(self) -> int:
         return len(self.doc) if self.doc is not None else 0
+
+    def _on_tab_type_changed(self, value: str) -> None:
+        if value:
+            self.default_tab_type = value
+
+    @staticmethod
+    def _to_float(value, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _to_int(value, default: int = 0) -> int:
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _normalize_tab_collection_name(value: str | None) -> str | None:
+        if not value:
+            return None
+        raw = value.strip()
+        if not raw:
+            return None
+        raw_lower = raw.lower()
+        if raw_lower.endswith("tabs"):
+            return DOCUSIGN_TAB_TYPES_BY_LOWER.get(raw_lower, raw)
+        candidate = f"{raw}Tabs"
+        return DOCUSIGN_TAB_TYPES_BY_LOWER.get(candidate.lower())
 
     def find_placeholder_by_id(self, placeholder_id: int | None) -> Placeholder | None:
         if placeholder_id is None:
@@ -457,6 +541,7 @@ class MainWindow(QMainWindow):
 
         self.status_label.setText(
             f"Page {self.current_page + 1}/{len(self.doc)} | Zoom {self.zoom:.2f} | "
+            f"Tab type: {self.default_tab_type} | "
             f"Page placeholders: {len(self.placeholders_for_current_page())} | Total: {len(self.placeholders)}"
         )
 
@@ -489,17 +574,19 @@ class MainWindow(QMainWindow):
 
     def _extract_tabs_from_payload(self, node, found: list[dict], tab_type: str | None = None) -> None:
         if isinstance(node, dict):
-            if (
-                isinstance(node.get("xPosition"), (int, float))
-                and isinstance(node.get("yPosition"), (int, float))
-                and isinstance(node.get("pageNumber"), (int, float))
-            ):
+            x_pos = self._to_float(node.get("xPosition"), default=float("nan"))
+            y_pos = self._to_float(node.get("yPosition"), default=float("nan"))
+            page_num = self._to_int(node.get("pageNumber"), default=-1)
+
+            if page_num >= 1 and x_pos == x_pos and y_pos == y_pos:
                 tab = dict(node)
-                tab["_tab_type"] = tab_type or "fullNameTabs"
+                typed = self._normalize_tab_collection_name(str(node.get("tabType") or ""))
+                tab["_tab_type"] = typed or tab_type or self.default_tab_type
                 found.append(tab)
 
             for key, value in node.items():
-                child_tab_type = key if key.endswith("Tabs") else tab_type
+                normalized_key = self._normalize_tab_collection_name(key)
+                child_tab_type = normalized_key if normalized_key else tab_type
                 self._extract_tabs_from_payload(value, found, child_tab_type)
             return
 
@@ -532,13 +619,13 @@ class MainWindow(QMainWindow):
         doc_pages = len(self.doc)
         next_id = 1
         for tab in tabs:
-            page_num = int(tab.get("pageNumber", 1))
+            page_num = self._to_int(tab.get("pageNumber"), 1)
             page_index = page_num - 1
             if page_index < 0 or page_index >= doc_pages:
                 continue
 
-            width = float(tab.get("width", 0) or 0)
-            height = float(tab.get("height", 0) or 0)
+            width = self._to_float(tab.get("width", 0), 0)
+            height = self._to_float(tab.get("height", 0), 0)
             if width <= 0:
                 width = 160.0
             if height <= 0:
@@ -547,13 +634,14 @@ class MainWindow(QMainWindow):
             ph = Placeholder(
                 id=next_id,
                 page_index=page_index,
-                x=float(tab.get("xPosition", 0)),
-                y=float(tab.get("yPosition", 0)),
+                x=self._to_float(tab.get("xPosition", 0), 0),
+                y=self._to_float(tab.get("yPosition", 0), 0),
                 width=width,
                 height=height,
                 tab_id=str(tab.get("tabId") or uuid4()),
+                document_id=str(tab.get("documentId") or "1"),
                 tab_label=str(tab.get("tabLabel") or ""),
-                tab_type=str(tab.get("_tab_type") or "fullNameTabs"),
+                tab_type=str(tab.get("_tab_type") or self.default_tab_type),
             )
             next_id += 1
             new_placeholders.append(ph)
@@ -585,16 +673,16 @@ class MainWindow(QMainWindow):
 
         grouped: dict[str, list[dict]] = {}
         for ph in self.placeholders:
-            tab_type = ph.tab_type or "fullNameTabs"
+            tab_type = self._normalize_tab_collection_name(ph.tab_type) or self.default_tab_type
             tab = {
-                "documentId": "1",
-                "pageNumber": ph.page_index + 1,
-                "xPosition": round(ph.x, 2),
-                "yPosition": round(ph.y, 2),
+                "documentId": str(ph.document_id or "1"),
+                "pageNumber": str(ph.page_index + 1),
+                "xPosition": str(int(round(ph.x))),
+                "yPosition": str(int(round(ph.y))),
                 "tabId": ph.tab_id,
                 "tabLabel": ph.tab_label,
-                "width": round(ph.width, 2) if ph.width > 0 else 0,
-                "height": round(ph.height, 2) if ph.height > 0 else 0,
+                "width": str(int(round(ph.width))) if ph.width > 0 else "0",
+                "height": str(int(round(ph.height))) if ph.height > 0 else "0",
             }
             grouped.setdefault(tab_type, []).append(tab)
 

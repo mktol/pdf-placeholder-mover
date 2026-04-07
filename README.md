@@ -27,6 +27,7 @@ python main.py
 ## Usage
 
 - Click `Open PDF`
+- Choose tab collection type in `Tab type` dropdown (for new placeholders)
 - Import DocuSign tabs: `Import Tabs JSON`
 - Draw placeholder: drag on empty area
 - Select placeholder: left click on it
@@ -53,13 +54,13 @@ Export produces this structure:
           "fullNameTabs": [
             {
               "documentId": "1",
-              "pageNumber": 1,
-              "xPosition": 70,
-              "yPosition": 655,
+              "pageNumber": "1",
+              "xPosition": "70",
+              "yPosition": "655",
               "tabId": "uuid",
               "tabLabel": "some label",
-              "width": 160,
-              "height": 24
+              "width": "160",
+              "height": "24"
             }
           ]
         }
@@ -74,7 +75,17 @@ Import supports finding tab objects anywhere in JSON if they contain:
 - `xPosition`
 - `yPosition`
 
+Supported collections include `signHereTabs`, `initialHereTabs`, `dateSignedTabs`, `fullNameTabs`,
+`firstNameTabs`, `lastNameTabs`, `emailTabs`, `emailAddressTabs`, `companyTabs`, `titleTabs`, `textTabs`,
+`numberTabs`, `numericalTabs`, `dateTabs`, `phoneNumberTabs`, `ssnTabs`, `zipTabs`, `noteTabs`,
+`checkboxTabs`, `radioGroupTabs`, `listTabs`, `approveTabs`, `declineTabs`, `formulaTabs`, `drawTabs`,
+`viewTabs`, `signerAttachmentTabs`, `notarizeTabs`, `notarySealTabs`, `envelopeIdTabs` and others in the
+DocuSign tabs model.
+
+Import also accepts numeric strings (for example `"pageNumber": "2"`).
+
 Width/height fallback defaults are used when imported values are `0`.
+`documentId` is preserved on import and exported back per placeholder.
 
 ## Raw app JSON format
 
@@ -88,7 +99,11 @@ Width/height fallback defaults are used when imported values are `0`.
       "x": 120.5,
       "y": 300.0,
       "width": 220.0,
-      "height": 45.0
+      "height": 45.0,
+      "tab_id": "uuid",
+      "document_id": "1",
+      "tab_label": "some label",
+      "tab_type": "signHereTabs"
     }
   ]
 }
